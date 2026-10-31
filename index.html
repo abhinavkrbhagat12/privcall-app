@@ -1,1 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PrivCall — Private 1-to-1 Calling</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- PeerJS for Live 1-to-1 WebRTC Voice Calling -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+  <div id="root"></div>
 
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const STORAGE_USERS = 'privcall_users_v1';
+    const STORAGE_SESSION = 'privcall_session_v1';
+
+    function App() {
+      // Database of local users: { username: { username, password, displayName, friends: [], requests: [], blocked: [] } }
+      const [usersDb, setUsersDb] = useState(() => {
+        const saved = localStorage.getItem(STORAGE_USERS);
+        return saved ? JSON.parse(saved) : {
+          echo_test: { username: 'echo_test', password: '123', displayName: 'Echo Test Bot', friends: [], requests: [], blocked: [] }
+        };
+      });
+
+      const [currentUser, setCurrentUser] = useState(() => {
+        const savedSession = localStorage.getItem(STORAGE_SESSION);
+        return savedSession ? JSON.parse(savedSession) : null;
+      });
+
+      // Auth states
+      const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
+      const [usernameInput, setUsernameInput] = useState('');
+      const [passwordInput, setPasswordInput] = useState('');
+      const [displayNameInput, setDisplayNameInput] = useState('');
+      const [rememberMe, setRememberMe] = useState(true);
+      const [authError, setAuthError] = useState('');
+
+      // App states
+      const [exactSearchInput, setExactSearchInput] = useState('');
+      const [foundUser, setFoundUser] = useState(null);
+      const [searchStatus, setSearchStatus] = useState('');
+      const [editingName, setEditingName] = useState(false);
+      const [newDisplayName, setNewDisplayName] = useState('');
+      const [manualRequestInput, setManualRequestInput] = useState('');
+
+      // Calling & WebRTC states
+      const [peerStatus, setPeerStatus] = useState('Disconnected');
+      const [callState, setCallState] = useState('idle'); // 'idle' | 'calling' | 'incoming' | 'connected'
+      const [activePeer, setActivePeer] = useState('');
+      const [isMuted, setIsMuted] = useState(false);
+      const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+      const [callSeconds, setCallSeconds] = useState(0);
+
+      const peerInstance = useRef(null);
+      const currentCall = useRef(null);
+      const localStreamRef = useRef(null);
+      const remoteAudioRef = useRef(null);
+      const timerRef = useRef(null);
+
+      // Save users DB changes
+      useEffect(() => {
+        localStorage.setItem(STORAGE_USERS, JSON.stringify(usersDb));
+      }, [usersDb]);
+
+      // Initialize WebRTC Peer when logged in
+      useEffect(() => {
+        if (!currentUser) return;
+
+        const cleanId = 'privcall_app_' + currentUser.username.toLowerCase();
+        const peer = new window.Peer(cleanId);
+        peerInstance.current = peer;
+
+        peer.on('open', () => {
+          setPeerStatus('Online & Ready');
+        });
+
+        peer.on('error', (err) => {
+          if (err.type === 'unavailable-id') {
+            setPeerStatus('Username already active on another tab/device');
+          } else if (err.type === 'peer-unavailable') {
+            alert('User is currently offline or username does not exist online.');
+            endCallCleanup();
+          }
+        });
+
+        // Listen for incoming friend requests or name metadata via DataConnection
+        peer.on('connection', (conn) => {
+          conn.on('data', (data) => {
+            if (data.type === 'FRIEND_REQUEST') {
+              addIncomingRequest(data.from);
+            } else if (data.type === 'FRIEND_ACCEPT') {
+              finalizeMutualFriend(data.from);
+            }
+          });
+        });
+
+        // Listen for incoming voice calls
+        peer.on('call', (call) => {
+          const callerUsername = call.peer.replace('privcall_app_', '');
+          const myData = usersDb[currentUser.username] || currentUser;
+          if (myData.blocked && myData.blocked.includes(callerUsername)) {
+            call.close();
+            return;
+          }
+          currentCall.current = call;
+          setActivePeer(callerUsername);
+          setCallState('incoming');
+        });
+
+        return () => {
+          peer.destroy();
+        };
+      }, [currentUser]);
+
+      // Unlimited Call Timer
+      useEffect(() => {
+        if (callState === 'connected') {
+          setCallSeconds(0);
+          timerRef.current = setInterval(() => {
+            setCallSeconds((prev) => prev + 1);
+          }, 1000);
+        } else {
+          clearInterval(timerRef.current);
+        }
+        return () => clearInterval(timerRef.current);
+      }, [callState]);
+
+      const formatDuration = (secs) => {
+        const hrs = String(Math.floor(secs / 3600)).padStart(2, '0');
+        const mins = String(Math.floor((secs % 3600) / 60)).padStart(2, '0');
+        const s = String(secs % 60).padStart(2, '0');
+        return `${hrs}:${mins}:${s}`;
+      };
+
+      // Handle Login / Signup with strict duplicate prevention
+      const handleAuth = (e) => {
+        e.preventDefault();
+        setAuthError('');
+        const cleanUser = usernameInput.trim().toLowerCase();
+        if (!cleanUser || !passwordInput) {
+          setAuthError('Please enter both username and password.');
+          return;
+        }
+        if (!/^[a-z0-9_]+$/.test(cleanUser)) {
+          setAuthError('Username can only contain letters, numbers, and underscores.');
+          return;
+        }
+
+        if (authMode === 'signup') {
+          if (usersDb[cleanUser]) {
+            setAuthError('Duplicate username! This username is already taken.');
+            return;
+          }
+          const newUser = {
+            username: cleanUser,
+            password: passwordInput,
+            displayName: displayNameInput.trim() || cleanUser,
+            friends: [],
+            requests: [],
+            blocked: []
+          };
+          const updatedDb = { ...usersDb, [cleanUser]: newUser };
+          setUsersDb(updatedDb);
+          setCurrentUser(newUser);
+          if (rememberMe) {
+            localStorage.setItem(STORAGE_SESSION, JSON.stringify(newUser));
+          }
+        } else {
+          const existing = usersDb[cleanUser];
+          if (!existing || existing.password !== passwordInput) {
+            setAuthError('Invalid username or password.');
+            return;
+          }
+          setCurrentUser(existing);
+          if (rememberMe) {
+            localStorage.setItem(STORAGE_SESSION, JSON.stringify(existing));
+          }
+        }
+      };
+
+      const handleSignOut = () => {
+        endCallCleanup();
+        localStorage.removeItem(STORAGE_SESSION);
+        setCurrentUser(null);
+        setUsernameInput('');
+        setPasswordInput('');
+        setFoundUser(null);
+        setExactSearchInput('');
+      };
+
+      const updateDisplayName = () => {
+        if (!newDisplayName.trim()) return;
+        const updatedUser = { ...usersDb[currentUser.username], displayName: newDisplayName.trim() };
+        setUsersDb({ ...usersDb, [currentUser.username]: updatedUser });
+        setCurrentUser(updatedUser);
+        localStorage.setItem(STORAGE_SESSION, JSON.stringify(updatedUser));
+        setEditingName(false);
+      };
+
+      // Exact username lookup (Zero suggestions)
+      const handleExactLookup = (e) => {
+        e.preventDefault();
+        const target = exactSearchInput.trim().toLowerCase();
+        if (!target) return;
+        if (target === currentUser.username) {
+          setFoundUser(null);
+          setSearchStatus('You cannot search or call yourself.');
+          return;
+        }
+        const myData = usersDb[currentUser.username];
+        if (myData.blocked?.includes(target)) {
+          setFoundUser(null);
+          setSearchStatus(`@${target} is blocked. Unblock them first.`);
+          return;
+        }
+        // Exact match either in local DB or live network peer
+        setFoundUser({
+          username: target,
+          displayName: usersDb[target]?.displayName || target
+        });
+        setSearchStatus('');
+      };
+
+      // Mutual Friend System
+      const sendFriendRequest = (targetUsername) => {
+        if (peerInstance.current) {
+          const conn = peerInstance.current.connect('privcall_app_' + targetUsername);
+          conn.on('open', () => {
+            conn.send({ type: 'FRIEND_REQUEST', from: currentUser.username });
+          });
+        }
+        // Also update local state if on same browser
+        if (usersDb[targetUsername]) {
+          const targetObj = usersDb[targetUsername];
+          if (!targetObj.requests.includes(currentUser.username) && !targetObj.friends.includes(currentUser.username)) {
+            setUsersDb((prev) => ({
+              ...prev,
+              [targetUsername]: { ...targetObj, requests: [...targetObj.requests, currentUser.username] }
+            }));
+          }
+        }
+        alert(`Friend request sent to @${targetUsername}. Once both accept, they will appear in your Friends list.`);
+      };
+
+      const addIncomingRequest = (fromUser) => {
+        setUsersDb((prev) => {
+          const me = prev[currentUser.username];
+          if (me.friends.includes(fromUser) || me.requests.includes(fromUser)) return prev;
+          const updatedMe = { ...me, requests: [...me.requests, fromUser] };
+          setCurrentUser(updatedMe);
+          return { ...prev, [currentUser.username]: updatedMe };
+        });
+      };
+
+      const acceptFriendRequest = (fromUser) => {
+        if (peerInstance.current) {
+          const conn = peerInstance.current.connect('privcall_app_' + fromUser);
+          conn.on('open', () => {
+            conn.send({ type: 'FRIEND_ACCEPT', from: currentUser.username });
+          });
+        }
+        finalizeMutualFriend(fromUser);
+      };
+
+      const finalizeMutualFriend = (friendUsername) => {
+        setUsersDb((prev) => {
+          const me = prev[currentUser.username];
+          const updatedRequests = (me.requests || []).filter((r) => r !== friendUsername);
+          const updatedFriends = me.friends.includes(friendUsername) ? me.friends : [...me.friends, friendUsername];
+          const updatedMe = { ...me, requests: updatedRequests, friends: updatedFriends };
+          setCurrentUser(updatedMe);
+          localStorage.setItem(STORAGE_SESSION, JSON.stringify(updatedMe));
+
+          const other = prev[friendUsername];
+          if (other) {
+            const otherFriends = other.friends.includes(currentUser.username) ? other.friends : [...other.friends, currentUser.username];
+            return {
+              ...prev,
+              [currentUser.username]: updatedMe,
+              [friendUsername]: { ...other, friends: otherFriends }
+            };
+          }
+          return { ...prev, [currentUser.username]: updatedMe };
+        });
+      };
+
+      // Start 1-to-1 Call
+      const startCall = async (targetUsername) => {
+        const myData = usersDb[currentUser.username];
+        if (myData.blocked?.includes(targetUsername)) {
+          alert('User is blocked.');
+          return;
+        }
+        setActivePeer(targetUsername);
+        setCallState('calling');
+
+        if (targetUsername === 'echo_test') {
+          setTimeout(() => setCallState('connected'), 1200);
+          return;
+        }
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          localStreamRef.current = stream;
+          const call = peerInstance.current.call('privcall_app_' + targetUsername, stream);
+          currentCall.current = call;
+
+          call.on('stream', (remoteStream) => {
+            if (remoteAudioRef.current) {
+              remoteAudioRef.current.srcObject = remoteStream;
+              remoteAudioRef.current.play();
+            }
+            setCallState('connected');
+          });
+
+          call.on('close', () => {
+            endCallCleanup();
+          });
+        } catch (err) {
+          alert('Microphone access is required to place a voice call.');
+          endCallCleanup();
+        }
+      };
+
+      const answerCall = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          localStreamRef.current = stream;
+          currentCall.current.answer(stream);
+          setCallState('connected');
+
+          currentCall.current.on('stream', (remoteStream) => {
+            if (remoteAudioRef.current) {
+              remoteAudioRef.current.srcObject = remoteStream;
+              remoteAudioRef.current.play();
+            }
+          });
+          currentCall.current.on('close', () => {
+            endCallCleanup();
+          });
+        } catch (err) {
+          alert('Microphone permission is needed to answer calls.');
+          endCallCleanup();
+        }
+      };
+
+      const endCallCleanup = () => {
+        if (currentCall.current) currentCall.current.close();
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((t) => t.stop());
+        }
+        setCallState('idle');
+        setActivePeer('');
+        setIsMuted(false);
+      };
+
+      const toggleMute = () => {
+        const nextMute = !isMuted;
+        setIsMuted(nextMute);
+        if (localStreamRef.current) {
+          localStreamRef.current.getAudioTracks().forEach((track) => {
+            track.enabled = !nextMute;
+          });
+        }
+      };
+
+      const toggleSpeaker = () => {
+        const nextSpeaker = !isSpeakerOn;
+        setIsSpeakerOn(nextSpeaker);
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.volume = nextSpeaker ? 1.0 : 0.2;
+        }
+      };
+
+      const toggleBlockUser = (targetUsername) => {
+        const me = usersDb[currentUser.username];
+        const isBlocked = me.blocked?.includes(targetUsername);
+        const updatedBlocked = isBlocked
+          ? me.blocked.filter((b) => b !== targetUsername)
+          : [...(me.blocked || []), targetUsername];
+
+        const updatedMe = { ...me, blocked: updatedBlocked };
+        setUsersDb({ ...usersDb, [currentUser.username]: updatedMe });
+        setCurrentUser(updatedMe);
+        if (!isBlocked && activePeer === targetUsername) {
+          endCallCleanup();
+        }
+      };
+
+      if (!currentUser) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-4">
+            <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl">
+              <h1 className="text-2xl font-bold text-emerald-400 mb-1">PrivCall</h1>
+              <p className="text-xs text-slate-400 mb-6">Zero-suggestion private 1-to-1 calling</p>
+
+              <div className="flex gap-2 mb-6 bg-slate-950 p-1 rounded-xl">
+                <button
+                  onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                  className={`flex-1 py-2 rounded-lg text-sm font-semibold ${authMode === 'login' ? 'bg-emerald-600 text-white' : 'text-slate-400'}`}
+                >
+                  Login
+                </button>
+                <button
+                  onClick={() => { setAuthMode('signup'); setAuthError(''); }}
+                  className={`flex-1 py-2 rounded-lg text-sm font-semibold ${authMode === 'signup' ? 'bg-emerald-600 text-white' : 'text-slate-400'}`}
+                >
+                  Create Account
+                </button>
+              </div>
+
+              {authError && (
+                <div className="mb-4 p-3 bg-red-950/60 border border-red-700 text-red-300 text-xs rounded-xl">
+                  {authError}
+                </div>
+              )}
+
+              <form onSubmit={handleAuth} className="space-y-4" autoComplete="off">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Exact Username (Unique)</label>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    value={usernameInput}
+                    onChange={(e) => setUsernameInput(e.target.value)}
+                    placeholder="e.g. rahul_99"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                {authMode === 'signup' && (
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Display Name</label>
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      value={displayNameInput}
+                      onChange={(e) => setDisplayNameInput(e.target.value)}
+                      placeholder="Your Name"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Password</label>
+                  <input
+                    type="password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="accent-emerald-500"
+                  />
+                  Remember my username & password
+                </label>
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 rounded-xl transition"
+                >
+                  {authMode === 'login' ? 'Sign In' : 'Register Unique Username'}
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
+      const myRecord = usersDb[currentUser.username] || currentUser;
+
+      return (
+        <div className="max-w-3xl mx-auto p-4 space-y-6">
+          <audio ref={remoteAudioRef} autoPlay />
+
+          {/* Header */}
+          <header className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-lg font-bold text-emerald-400">{myRecord.displayName}</span>
+                <button
+                  onClick={() => { setEditingName(!editingName); setNewDisplayName(myRecord.displayName); }}
+                  className="text-xs bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded text-slate-300"
+                >
+                  Set Name
+                </button>
+              </div>
+              <p className="text-xs text-slate-400">@{myRecord.username} • {peerStatus}</p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-xl text-xs">
+                Mutual Friends: <span className="font-bold text-emerald-400">{(myRecord.friends || []).length}</span>
+              </div>
+              <button
+                onClick={handleSignOut}
+                className="bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-200 text-xs px-3 py-2 rounded-xl font-medium"
+              >
+                Sign Out
+              </button>
+            </div>
+          </header>
+
+          {/* Edit Display Name */}
+          {editingName && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex gap-2">
+              <input
+                type="text"
+                value={newDisplayName}
+                onChange={(e) => setNewDisplayName(e.target.value)}
+                placeholder="Enter new display name"
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm"
+              />
+              <button onClick={updateDisplayName} className="bg-emerald-600 px-4 py-2 rounded-xl text-xs font-semibold">
+                Save Name
+              </button>
+            </div>
+          )}
+
+          {/* Active / Incoming Call Banner */}
+          {callState !== 'idle' && (
+            <div className="bg-slate-900 border-2 border-emerald-600 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
+              <p className="text-xs uppercase tracking-widest text-emerald-400 font-semibold">
+                {callState === 'calling' && 'Dialing...'}
+                {callState === 'incoming' && 'Incoming 1-to-1 Call'}
+                {callState === 'connected' && 'Unlimited Live Call Connected'}
+              </p>
+              <h2 className="text-2xl font-bold">@{activePeer}</h2>
+              {callState === 'connected' && (
+                <p className="text-xl font-mono text-emerald-300">{formatDuration(callSeconds)}</p>
+              )}
+
+              <div className="flex flex-wrap justify-center gap-3 pt-2">
+                {callState === 'incoming' ? (
+                  <>
+                    <button onClick={answerCall} className="bg-emerald-600 hover:bg-emerald-500 px-6 py-2.5 rounded-xl font-semibold text-sm">
+                      Accept Call
+                    </button>
+                    <button onClick={endCallCleanup} className="bg-red-600 hover:bg-red-500 px-6 py-2.5 rounded-xl font-semibold text-sm">
+                      Decline
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={toggleMute}
+                      className={`px-4 py-2.5 rounded-xl text-xs font-semibold border ${isMuted ? 'bg-amber-600 border-amber-500 text-white' : 'bg-slate-800 border-slate-700'}`}
+                    >
+                      {isMuted ? 'Muted (Click to Unmute)' : 'Mute Mic'}
+                    </button>
+                    <button
+                      onClick={toggleSpeaker}
+                      className={`px-4 py-2.5 rounded-xl text-xs font-semibold border ${isSpeakerOn ? 'bg-emerald-900/60 border-emerald-600 text-emerald-200' : 'bg-slate-800 border-slate-700'}`}
+                    >
+                      {isSpeakerOn ? 'Speaker: ON' : 'Speaker: OFF'}
+                    </button>
+                    <button
+                      onClick={() => toggleBlockUser(activePeer)}
+                      className="bg-slate-800 hover:bg-red-950 border border-slate-700 px-4 py-2.5 rounded-xl text-xs font-semibold text-red-300"
+                    >
+                      Block User
+                    </button>
+                    <button
+                      onClick={endCallCleanup}
+                      className="bg-red-600 hover:bg-red-500 px-6 py-2.5 rounded-xl text-xs font-semibold text-white"
+                    >
+                      End Call
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Exact Username Dialer (Zero Suggestions) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <h3 className="text-sm font-bold text-slate-200">Exact Username Dialer (No Suggestions)</h3>
+            <form onSubmit={handleExactLookup} className="flex gap-2" autoComplete="off">
+              <input
+                type="text"
+                autoComplete="off"
+                spellCheck="false"
+                value={exactSearchInput}
+                onChange={(e) => { setExactSearchInput(e.target.value); setFoundUser(null); }}
+                placeholder="Enter exact username (e.g. echo_test or friend's username)"
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
+              />
+              <button type="submit" className="bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 rounded-xl text-sm font-semibold">
+                Find Exact
+              </button>
+            </form>
+
+            {searchStatus && <p className="text-xs text-amber-400">{searchStatus}</p>}
+
+            {foundUser && (
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-semibold text-sm">@{foundUser.username}</p>
+                  <p className="text-xs text-slate-400">Exact match ready</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => startCall(foundUser.username)}
+                    className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-xl text-xs font-semibold"
+                  >
+                    Call Now
+                  </button>
+                  <button
+                    onClick={() => sendFriendRequest(foundUser.username)}
+                    className="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-xl text-xs font-semibold"
+                  >
+                    Add Friend
+                  </button>
+                  <button
+                    onClick={() => toggleBlockUser(foundUser.username)}
+                    className="bg-red-950/60 hover:bg-red-900 text-red-300 px-3 py-2 rounded-xl text-xs font-semibold"
+                  >
+                    {(myRecord.blocked || []).includes(foundUser.username) ? 'Unblock' : 'Block'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Pending Requests & Mutual Friends List */}
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <h3 className="text-sm font-bold">Incoming Friend Requests ({(myRecord.requests || []).length})</h3>
+              {(myRecord.requests || []).length === 0 ? (
+                <p className="text-xs text-slate-500">No pending requests.</p>
+              ) : (
+                (myRecord.requests || []).map((reqUser) => (
+                  <div key={reqUser} className="flex items-center justify-between bg-slate-950 p-3 rounded-xl border border-slate-800">
+                    <span className="text-sm font-medium">@{reqUser}</span>
+                    <button
+                      onClick={() => acceptFriendRequest(reqUser)}
+                      className="bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 rounded-lg text-xs font-semibold"
+                    >
+                      Accept
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <h3 className="text-sm font-bold">Mutual Friends ({(myRecord.friends || []).length})</h3>
+              {(myRecord.friends || []).length === 0 ? (
+                <p className="text-xs text-slate-500">Once both sides accept, friends appear here.</p>
+              ) : (
+                (myRecord.friends || []).map((friend) => (
+                  <div key={friend} className="flex items-center justify-between bg-slate-950 p-3 rounded-xl border border-slate-800">
+                    <span className="text-sm font-medium">@{friend}</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => startCall(friend)}
+                        className="bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 rounded-lg text-xs font-semibold"
+                      >
+                        Call
+                      </button>
+                      <button
+                        onClick={() => toggleBlockUser(friend)}
+                        className="bg-slate-800 hover:bg-red-950 text-red-300 px-2.5 py-1.5 rounded-lg text-xs"
+                      >
+                        {(myRecord.blocked || []).includes(friend) ? 'Unblock' : 'Block'}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
