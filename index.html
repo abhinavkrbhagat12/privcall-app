@@ -4,14 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PrivCall — Private 1-to-1 Calling</title>
-  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React & ReactDOM -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel for JSX -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- PeerJS for Live 1-to-1 WebRTC Voice Calling -->
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
@@ -24,7 +20,6 @@
     const STORAGE_SESSION = 'privcall_session_v1';
 
     function App() {
-      // Database of local users: { username: { username, password, displayName, friends: [], requests: [], blocked: [] } }
       const [usersDb, setUsersDb] = useState(() => {
         const saved = localStorage.getItem(STORAGE_USERS);
         return saved ? JSON.parse(saved) : {
@@ -37,25 +32,21 @@
         return savedSession ? JSON.parse(savedSession) : null;
       });
 
-      // Auth states
-      const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
+      const [authMode, setAuthMode] = useState('login');
       const [usernameInput, setUsernameInput] = useState('');
       const [passwordInput, setPasswordInput] = useState('');
       const [displayNameInput, setDisplayNameInput] = useState('');
       const [rememberMe, setRememberMe] = useState(true);
       const [authError, setAuthError] = useState('');
 
-      // App states
       const [exactSearchInput, setExactSearchInput] = useState('');
       const [foundUser, setFoundUser] = useState(null);
       const [searchStatus, setSearchStatus] = useState('');
       const [editingName, setEditingName] = useState(false);
       const [newDisplayName, setNewDisplayName] = useState('');
-      const [manualRequestInput, setManualRequestInput] = useState('');
 
-      // Calling & WebRTC states
       const [peerStatus, setPeerStatus] = useState('Disconnected');
-      const [callState, setCallState] = useState('idle'); // 'idle' | 'calling' | 'incoming' | 'connected'
+      const [callState, setCallState] = useState('idle');
       const [activePeer, setActivePeer] = useState('');
       const [isMuted, setIsMuted] = useState(false);
       const [isSpeakerOn, setIsSpeakerOn] = useState(true);
@@ -67,12 +58,10 @@
       const remoteAudioRef = useRef(null);
       const timerRef = useRef(null);
 
-      // Save users DB changes
       useEffect(() => {
         localStorage.setItem(STORAGE_USERS, JSON.stringify(usersDb));
       }, [usersDb]);
 
-      // Initialize WebRTC Peer when logged in
       useEffect(() => {
         if (!currentUser) return;
 
@@ -86,14 +75,13 @@
 
         peer.on('error', (err) => {
           if (err.type === 'unavailable-id') {
-            setPeerStatus('Username already active on another tab/device');
+            setPeerStatus('Username active on another tab/device');
           } else if (err.type === 'peer-unavailable') {
             alert('User is currently offline or username does not exist online.');
             endCallCleanup();
           }
         });
 
-        // Listen for incoming friend requests or name metadata via DataConnection
         peer.on('connection', (conn) => {
           conn.on('data', (data) => {
             if (data.type === 'FRIEND_REQUEST') {
@@ -104,7 +92,6 @@
           });
         });
 
-        // Listen for incoming voice calls
         peer.on('call', (call) => {
           const callerUsername = call.peer.replace('privcall_app_', '');
           const myData = usersDb[currentUser.username] || currentUser;
@@ -122,7 +109,6 @@
         };
       }, [currentUser]);
 
-      // Unlimited Call Timer
       useEffect(() => {
         if (callState === 'connected') {
           setCallSeconds(0);
@@ -142,7 +128,6 @@
         return `${hrs}:${mins}:${s}`;
       };
 
-      // Handle Login / Signup with strict duplicate prevention
       const handleAuth = (e) => {
         e.preventDefault();
         setAuthError('');
@@ -207,7 +192,6 @@
         setEditingName(false);
       };
 
-      // Exact username lookup (Zero suggestions)
       const handleExactLookup = (e) => {
         e.preventDefault();
         const target = exactSearchInput.trim().toLowerCase();
@@ -223,7 +207,6 @@
           setSearchStatus(`@${target} is blocked. Unblock them first.`);
           return;
         }
-        // Exact match either in local DB or live network peer
         setFoundUser({
           username: target,
           displayName: usersDb[target]?.displayName || target
@@ -231,7 +214,6 @@
         setSearchStatus('');
       };
 
-      // Mutual Friend System
       const sendFriendRequest = (targetUsername) => {
         if (peerInstance.current) {
           const conn = peerInstance.current.connect('privcall_app_' + targetUsername);
@@ -239,7 +221,6 @@
             conn.send({ type: 'FRIEND_REQUEST', from: currentUser.username });
           });
         }
-        // Also update local state if on same browser
         if (usersDb[targetUsername]) {
           const targetObj = usersDb[targetUsername];
           if (!targetObj.requests.includes(currentUser.username) && !targetObj.friends.includes(currentUser.username)) {
@@ -294,7 +275,6 @@
         });
       };
 
-      // Start 1-to-1 Call
       const startCall = async (targetUsername) => {
         const myData = usersDb[currentUser.username];
         if (myData.blocked?.includes(targetUsername)) {
@@ -487,7 +467,6 @@
         <div className="max-w-3xl mx-auto p-4 space-y-6">
           <audio ref={remoteAudioRef} autoPlay />
 
-          {/* Header */}
           <header className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
@@ -515,7 +494,6 @@
             </div>
           </header>
 
-          {/* Edit Display Name */}
           {editingName && (
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex gap-2">
               <input
@@ -531,7 +509,6 @@
             </div>
           )}
 
-          {/* Active / Incoming Call Banner */}
           {callState !== 'idle' && (
             <div className="bg-slate-900 border-2 border-emerald-600 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
               <p className="text-xs uppercase tracking-widest text-emerald-400 font-semibold">
@@ -586,7 +563,6 @@
             </div>
           )}
 
-          {/* Exact Username Dialer (Zero Suggestions) */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
             <h3 className="text-sm font-bold text-slate-200">Exact Username Dialer (No Suggestions)</h3>
             <form onSubmit={handleExactLookup} className="flex gap-2" autoComplete="off">
@@ -636,7 +612,6 @@
             )}
           </div>
 
-          {/* Pending Requests & Mutual Friends List */}
           <div className="grid md:grid-cols-2 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
               <h3 className="text-sm font-bold">Incoming Friend Requests ({(myRecord.requests || []).length})</h3>
