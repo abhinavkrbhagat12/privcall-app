@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="manifest" href="/manifest.json">
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PrivCall — Private 1-to-1 Calling</title>
@@ -666,28 +667,30 @@
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
   </script>
-</body>
-</html>
-<link rel="manifest" href="manifest.json">
-<button id="installAppBtn" style="display:none; position:fixed; bottom:20px; right:20px; z-index:9999; background:#10b981; color:#ffffff; border:none; padding:12px 20px; border-radius:30px; font-weight:bold; font-size:15px; box-shadow:0 4px 12px rgba(0,0,0,0.3); cursor:pointer;">
+<button id="installAppBtn" style="position:fixed; bottom:20px; right:20px; z-index:9999; background:#10b981; color:#ffffff; border:none; padding:12px 20px; border-radius:30px; font-weight:bold; font-size:15px; box-shadow:0 4px 12px rgba(0,0,0,0.4); cursor:pointer;">
   📲 Install App
 </button>
 <script>
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js');
+    navigator.serviceWorker.register('/sw.js');
   }
   let deferredPrompt;
   const installBtn = document.getElementById('installAppBtn');
+  if (window.matchMedia('(display-mode: standalone)').matches) {
+    installBtn.style.display = 'none';
+  }
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     deferredPrompt = e;
-    installBtn.style.display = 'block';
   });
   installBtn.addEventListener('click', async () => {
     if (deferredPrompt) {
       deferredPrompt.prompt();
       deferredPrompt = null;
-      installBtn.style.display = 'none';
+    } else {
+      alert('Tap the 3 dots (⋮) at the top right of Chrome, then tap "Install and create shortcut" -> "Install"!');
     }
   });
 </script>
+</body>
+</html>
