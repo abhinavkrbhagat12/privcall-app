@@ -668,3 +668,26 @@
   </script>
 </body>
 </html>
+<link rel="manifest" href="manifest.json">
+<button id="installAppBtn" style="display:none; position:fixed; bottom:20px; right:20px; z-index:9999; background:#10b981; color:#ffffff; border:none; padding:12px 20px; border-radius:30px; font-weight:bold; font-size:15px; box-shadow:0 4px 12px rgba(0,0,0,0.3); cursor:pointer;">
+  📲 Install App
+</button>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js');
+  }
+  let deferredPrompt;
+  const installBtn = document.getElementById('installAppBtn');
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    installBtn.style.display = 'block';
+  });
+  installBtn.addEventListener('click', async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      deferredPrompt = null;
+      installBtn.style.display = 'none';
+    }
+  });
+</script>
